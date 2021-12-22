@@ -1,0 +1,20 @@
+---
+title: "AERONET Inversion V3 Daily average"
+output: html_notebook
+---
+
+
+```{r setup, include=FALSE}
+
+library(tidyverse)
+```
+
+```{r echo=FALSE}
+ussuriisk.data <- read.csv("data/20040101_20211222_Ussuriysk.all", skip = 6)
+```
+
+```{r}
+colnames(ussuriisk.data)
+```
+
+
