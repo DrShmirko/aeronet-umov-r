@@ -1,5 +1,5 @@
 ---
-title: "AERONET Inversion V3 Daily average"
+title: "AERONET Inversion V3 Daily average level 1.5"
 output: html_notebook
 ---
 
@@ -13,8 +13,19 @@ library(tidyverse)
 ussuriisk.data <- read.csv("data/20040101_20211222_Ussuriysk.all", skip = 6)
 ```
 
-```{r}
+```{r include=FALSE}
 colnames(ussuriisk.data)
+
+ussuriisk.data %>%
+  select(AOD_Extinction.Coarse.870nm.,
+         Sphericity_Factor...,
+         VolC.T, REff.T, Std.T,
+         VolC.F, REff.F, Std.F,
+         VolC.C, REff.C, Std.C,
+         Refractive_Index.Real_Part.870nm.,
+         Refractive_Index.Imaginary_Part.870nm.,
+         Depolarization_Ratio.870nm.,
+         Lidar_Ratio.870nm.) -> work.data
 ```
 
 
