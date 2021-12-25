@@ -1,31 +1,288 @@
 ---
-title: "AERONET Inversion V3 Daily average level 1.5"
-output: html_notebook
+title: "Предобработка данных AERONET"
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  html_notebook: default
 ---
 
-
-```{r setup, include=FALSE}
-
+```{r setup, message=FALSE, warning=FALSE}
 library(tidyverse)
+library(pls)
+library(gridExtra)
+library(knitr)
+library(viridis)
+
+#"""
+#Функция применяет к каждому столбцу каждую функцию в списке аргументов
+#"""
+multi.sapply <- function(...) {
+    arglist <- match.call(expand.dots = FALSE)$...
+    
+    var.names <- sapply(arglist, deparse)
+    print(var.names)
+    has.name <- (names(arglist) != "")
+    var.names[has.name] <- names(arglist)[has.name]
+    arglist <- lapply(arglist, eval.parent, n = 2)
+    print(arglist)
+    x <- arglist[[1]]
+    arglist[[1]] <- NULL
+    print(FUN)
+    result <- sapply(arglist, function (FUN, x) sapply(x, FUN), x)
+    colnames(result) <- var.names[-1]
+    return(result)
+}
 ```
 
-```{r echo=FALSE}
-ussuriisk.data <- read.csv("data/20040101_20211222_Ussuriysk.all", skip = 6)
-```
+
+## Теоретические сведения
+
+Первое, что мы будем делать - это проверим применимость эффекта Умова для данных сети AERONET. Для этого воспользуемся AERONET Inversion Product. Именно он содержит расчет функции распределения, пеобходимой для вычисления геометрического сечения частиц, а также значения коэффициентов ослабления и лидраного отношения.
+
+$$
+A = \frac{\pi S_{11}(180^\circ)}{k^2 G} = \frac{\pi \alpha_{ext}/LR}{G}
+$$
+где $\alpha_{ext}$ - коэффициент ослабления, $LR$ - лидарное отношение, $G$ - геометрическое сечение частиц.
+
+
+Оценить $G$ можно двумя способами - 1) по известной функции распределения; 2) по оценке объема частиц при логнормальном распределении.
+
+В первом случае это будет выглядеть следующим образом:
+
+$$
+\begin{eqnarray}
+\frac{dN}{d\ln r}&= &\frac{3}{4\pi r^3}\frac{dV}{d\ln r}&&\\
+\frac{dG}{d\ln r}&= &\pi r^2 \frac{dN}{d\ln r} &= &\frac{3}{4r}\frac{dV}{d\ln r}
+\end{eqnarray}
+$$
+Таким образом,
+
+$$
+G = \int_{r_0}^{r_1} \frac{3}{4r}\frac{dV}{d\ln r} d\ln r = \sum  \frac{3}{4r}\frac{dV}{d\ln r} \Delta \ln r
+$$
+Во втором случае воспользуемся оценками объема частиц по данным AERONET. Мы для этого имем параметры распределенения, такие как:
+
+1. $V$ - объем часиц в единице объема
+2. $r_m$ - медианный радиус
+3. $\sigma$ - полуширина распределения
+4. $\mu = \ln r_m$
+
+При этом объемная концентрация $V$ связана со счетной $N$ посредством выражения:
+
+$$
+\begin{eqnarray}
+V_0 & = &\frac{4}{3}\pi N_0 \exp(3\mu+4.5\sigma^2)\\
+\mu_v &=& \mu+3\sigma^2\\
+G_0 &=&\pi N_0 \exp(2\mu+2\sigma^2)
+\end{eqnarray}
+$$
+Отсюда выразив $N_0$ через $V_0$ и подставив в выраение для $G_0$ получим:
+
+$$
+\begin{eqnarray}
+N_0 &=& \frac{3 V_0}{4 \pi}\exp(-3\mu-4.5\sigma^2) \\
+G_0 &=& \pi \frac{3 V_0}{4 \pi}\exp(-3\mu-4.5\sigma^2)\exp(2\mu+2\sigma^2) \\
+G_0 &=& \frac{3V_0}{4}\exp(-\mu_v+0.5\sigma^2)
+\end{eqnarray}
+$$
 
 ```{r include=FALSE}
-colnames(ussuriisk.data)
+G0<-function(V0, Rm, Std){
+  tmp<-3.0/4.0*V0*exp(-log(Rm)+ 0.5*Std**2)
+  tmp
+}
 
-ussuriisk.data %>%
-  select(AOD_Extinction.Coarse.870nm.,
-         Sphericity_Factor...,
-         VolC.T, REff.T, Std.T,
-         VolC.F, REff.F, Std.F,
-         VolC.C, REff.C, Std.C,
-         Refractive_Index.Real_Part.870nm.,
-         Refractive_Index.Imaginary_Part.870nm.,
-         Depolarization_Ratio.870nm.,
-         Lidar_Ratio.870nm.) -> work.data
+G1<-function(dvdlnr, r){
+  dlnr = log(r[2]/r[1]);
+  ext<-sum(3*dvdlnr/(4*r))*dlnr;
+}
+
+GeomAlb <- function(Ext, LR, G) {
+  pi*Ext/(LR*G)
+}
+
+G2<-function(VF, RF, SF, VC, RC, SC){
+  G0(VF, RF, SF) + G0(VC, RC,SC);
+}
 ```
+
+В случае же двумодального распределения, суммарное сечениче частиц будет суммой сеченй каждой из мод.
+
+В итоге по рассматриваемому датасету мы получим 3 апроксимации геометрического сечения.
+
+## Подготовка данных
+
+загрузим данные и оставим те измерения, в которых сферичность была меньше 15%.
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+aeronet_orig <- read.csv("data/20040101_20211222_Ussuriysk.all", 
+                         header = TRUE,
+                         skip = 6)
+aeronet <- filter(aeronet_orig, Sphericity_Factor...<15)
+```
+
+Теперь, кодгда датасет содержит необходимые измерения произведем оценку сечения частиц:
+
+```{r include=FALSE}
+GA0_tot <- apply(aeronet[,c(77,79,80,13,115)], 1, function(x){
+  G <- G0(x[1], x[2], x[3])
+  GeomAlb(x[4], x[5], G)
+})
+
+GA1_tot <- apply(aeronet[,c(81, 83, 84, 85, 87, 88, 13,115)], 1,function(x) {
+  G<-G2(x[1], x[2], x[3], x[4], x[5], x[6])
+  GeomAlb(x[7], x[8], G)
+})
+
+R <- 10**(log10(0.05)+(seq(22)-1)*log10(15/0.05)/21)
+
+G2_tot <- apply(aeronet[,c(54:75)], 1, function(x){
+  G1(x, R)
+})
+
+GA2_tot <- apply(aeronet[,c(54:75, 13, 115)], 1, function(x){
+  G <- G1(x[c(1:22)], R)
+  GeomAlb(x[23], x[24], G)
+})
+
+analysis.aeronet <- data.frame(log10(GA0_tot), log10(GA1_tot), log10(GA2_tot),
+                               aeronet$Depolarization_Ratio.870nm.,
+                               aeronet$Refractive_Index.Real_Part.870nm.,
+                               aeronet$Refractive_Index.Imaginary_Part.870nm.)
+
+colnames(analysis.aeronet) <- c("GA0", "GA1", "GA2", "MuL", "ReIdx", "ImIdx")
+analysis.aeronet <- filter(analysis.aeronet, ReIdx<1.6)
+```
+
+Исходная таблица приведена ниже (первые 6 строк). Солбцы:
+
+1. GA0 десятичный логарифм геометрического альбедо (сечение вычислено из апроксимации исниного распределения одномодальной логнормальной функцией)
+
+2. GA1 десятичный логарифм геометрического альбедо (сечение вычислено из апроксимации исниного распределения бимодальной логнормальной функцией)
+
+3. GA2 десятичный логарифм геометрического альбедо (сечение вычислено из истиной функции распределния объемов частиц по размерам)
+
+4. MuL линейное деполяризационное отношение (длина волны 0.87 мкм)
+
+5. ReIdx, ImIdx - действительная и мнимая части показателя преломления
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+kable(head(analysis.aeronet))
+```
+
+Эффект Умова устанавливает линейную связь между логарифмом геометрического альбедо и логарифмом максимальной степени поляризации []. Учеными было показано, что существует также линейная связь между логарифмом геометрического альбедо и степенью линейной деполяризации в обратном направлении.
+
+Рассмотрим существование линейной связи между логарифмом геометрического альбедо и следущими параметрами: линейной деполяризация ($\mu_l$), действительная ($real(m)$) и мнимая ($imag(m)$) части коэффициента преломления. 
+
+```{r echo=FALSE}
+fit0.eq1 <- lm(formula='GA0~MuL', data = analysis.aeronet)
+fit0.eq2 <- lm(formula='GA0~MuL+ReIdx', data = analysis.aeronet)
+fit0.eq3 <- lm(formula='GA0~MuL+ReIdx+ImIdx', data = analysis.aeronet)
+
+
+fit1.eq1 <- lm(formula='GA1~MuL', data = analysis.aeronet)
+fit1.eq2 <- lm(formula='GA1~MuL+ReIdx', data = analysis.aeronet)
+fit1.eq3 <- lm(formula='GA1~MuL+ReIdx+ImIdx', data = analysis.aeronet)
+
+fit2.eq1 <- lm(formula='GA2~MuL', data = analysis.aeronet)
+fit2.eq2 <- lm(formula='GA2~MuL+ReIdx', data = analysis.aeronet)
+fit2.eq3 <- lm(formula='GA2~MuL+ReIdx*ImIdx', data = analysis.aeronet)
+```
+
+Статистика подгона некоторых моделей:
+
+```{r}
+summary(fit1.eq1)
+
+summary(fit1.eq2)
+
+summary(fit1.eq3)
+```
+```{r}
+jet.colors <-
+  colorRampPalette(c("#00007F", "blue", "#007FFF", "cyan",
+                     "#7FFF7F", "yellow", "#FF7F00", "red", "#7F0000"))
+```
+
+
+```{r echo=FALSE}
+theme_set(theme_light())
+
+p1 <- ggplot()+
+  geom_point(mapping = aes(x=analysis.aeronet$GA1, y=predict(fit1.eq1), 
+                           color=analysis.aeronet$ReIdx))+
+  geom_abline(slope = 1, intercept = 0)+
+  scale_colour_gradientn(colours=jet.colors(6))+
+  geom_rug(mapping = aes(x=analysis.aeronet$GA1, color=analysis.aeronet$ReIdx))+
+  #scale_color_viridis(discrete = FALSE, option = "D")+
+  xlim(-2, -0.5)+
+  ylim(-2, -0.5)+
+  labs(x="",y="", color="Re(m)")
+  
+
+p2 <- ggplot()+
+  geom_point(mapping = aes(x=analysis.aeronet$GA1, y=predict(fit1.eq2), 
+                           color=analysis.aeronet$ReIdx))+
+  geom_abline(slope = 1, intercept = 0)+
+  scale_color_continuous()+
+  geom_rug(mapping = aes(x=analysis.aeronet$GA1, color=analysis.aeronet$ReIdx))+
+  scale_colour_gradientn(colours=jet.colors(6))+
+  xlim(-2, -0.5)+
+  ylim(-2, -0.5)+
+  labs(x="",y="Geom. Alb. (predicted)", color="Re(m)")
+
+p3 <- ggplot()+
+  geom_point(mapping = aes(x=analysis.aeronet$GA1, y=predict(fit1.eq3), 
+                           color=analysis.aeronet$ReIdx))+
+  geom_abline(slope = 1, intercept = 0)+
+  scale_color_continuous()+
+  geom_rug(mapping = aes(x=analysis.aeronet$GA1, color=analysis.aeronet$ReIdx))+
+  scale_colour_gradientn(colours=jet.colors(6))+
+  xlim(-2, -0.5)+
+  ylim(-2, -0.5)+
+  labs(x="Geom. Alb. (measured)",y="", color="Re(m)")
+
+grid.arrange(p1, p2, p3, ncol=1)
+
+```
+```{r}
+a.fig <- lm(analysis.aeronet$GA1~analysis.aeronet$MuL)
+a.conf <- confint(a.fig)
+
+b.fig <- lm(analysis.aeronet$GA1~analysis.aeronet$ReIdx)
+b.conf <- confint(b.fig)
+
+c.fig <- lm(analysis.aeronet$GA1~analysis.aeronet$ImIdx)
+c.conf <- confint(c.fig)
+
+par(mfrow = c(1, 3), mar = c(4, 4, 2, 1), oma = c(0, 0, 2, 0))
+
+  plot(analysis.aeronet$MuL, analysis.aeronet$GA1, 
+       main="Geom. Alb. and mu_l")
+  abline(a.fig, col='red')
+  abline(a.conf[,1], lty=3, col='red')
+  abline(a.conf[,2], lty=3, col='red')
+  grid()
+  plot(analysis.aeronet$ReIdx, analysis.aeronet$GA1, 
+       main="Geom. Alb. and Reidx")
+  abline(b.fig, col='red')
+  abline(b.conf[,1], lty=3, col='red')
+  abline(b.conf[,2], lty=3, col='red')
+  grid()
+  plot(analysis.aeronet$ImIdx, analysis.aeronet$GA1, 
+       main="Geom. Alb. and Imidx")
+  abline(c.fig, col='red')
+  abline(c.conf[,1], lty=3, col='red')
+  abline(c.conf[,2], lty=3, col='red')
+  grid()
+  mtext("", outer = TRUE)
+
+
+
+```
+
+
+
 
 
