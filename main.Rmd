@@ -7,7 +7,7 @@ output:
   html_notebook: default
 ---
 
-```{r setup, message=FALSE, warning=FALSE}
+```{r setup, message=FALSE, warning=FALSE, cache.lazy=TRUE}
 library(tidyverse)
 library(pls)
 library(gridExtra)
@@ -87,7 +87,7 @@ G_0 &=& \frac{3V_0}{4}\exp(-\mu_v+0.5\sigma^2)
 \end{eqnarray}
 $$
 
-```{r include=FALSE}
+```{r include=FALSE, cache.lazy=TRUE}
 G0<-function(V0, Rm, Std){
   tmp<-3.0/4.0*V0*exp(-log(Rm)+ 0.5*Std**2)
   tmp
@@ -115,16 +115,16 @@ G2<-function(VF, RF, SF, VC, RC, SC){
 
 загрузим данные и оставим те измерения, в которых сферичность была меньше 15%.
 
-```{r message=FALSE, warning=FALSE, include=FALSE}
-aeronet_orig <- read.csv("data/20040101_20211222_Ussuriysk.all", 
+```{r message=FALSE, warning=FALSE, include=FALSE, cache.lazy=TRUE}
+read.csv("data/20040101_20211222_Ussuriysk.all", 
                          header = TRUE,
-                         skip = 6)
-aeronet <- filter(aeronet_orig, Sphericity_Factor...<15)
+                         skip = 6) %>% 
+  filter(Sphericity_Factor...<15) -> aeronet
 ```
 
 Теперь, кодгда датасет содержит необходимые измерения произведем оценку сечения частиц:
 
-```{r include=FALSE}
+```{r include=FALSE, cache.lazy=TRUE}
 GA0_tot <- apply(aeronet[,c(77,79,80,13,115)], 1, function(x){
   G <- G0(x[1], x[2], x[3])
   GeomAlb(x[4], x[5], G)
@@ -146,12 +146,12 @@ GA2_tot <- apply(aeronet[,c(54:75, 13, 115)], 1, function(x){
   GeomAlb(x[23], x[24], G)
 })
 
-analysis.aeronet <- data.frame(log10(GA0_tot), log10(GA1_tot), log10(GA2_tot),
+analysis.aeronet <- data.frame(log10(GA1_tot),
                                aeronet$Depolarization_Ratio.870nm.,
                                aeronet$Refractive_Index.Real_Part.870nm.,
                                aeronet$Refractive_Index.Imaginary_Part.870nm.)
 
-colnames(analysis.aeronet) <- c("GA0", "GA1", "GA2", "MuL", "ReIdx", "ImIdx")
+colnames(analysis.aeronet) <- c("GA1", "MuL", "ReIdx", "ImIdx")
 analysis.aeronet <- filter(analysis.aeronet, ReIdx<1.6)
 ```
 
@@ -175,31 +175,25 @@ kable(head(analysis.aeronet))
 
 Рассмотрим существование линейной связи между логарифмом геометрического альбедо и следущими параметрами: линейной деполяризация ($\mu_l$), действительная ($real(m)$) и мнимая ($imag(m)$) части коэффициента преломления. 
 
-```{r echo=FALSE}
-fit0.eq1 <- lm(formula='GA0~MuL', data = analysis.aeronet)
-fit0.eq2 <- lm(formula='GA0~MuL+ReIdx', data = analysis.aeronet)
-fit0.eq3 <- lm(formula='GA0~MuL+ReIdx+ImIdx', data = analysis.aeronet)
+Ниже на рисунке приведена матрица взаимных корреляций между исследуемыми столбцами
+
+```{r echo=FALSE, fig.align='center', fig.cap="Взаимная корреляция факторов", message=FALSE, warning=FALSE, cache.lazy=TRUE}
+library(PerformanceAnalytics)
+chart.Correlation(analysis.aeronet[, c("GA1", "MuL", "ReIdx", "ImIdx")], histogram=TRUE, pch=19)
+```
+Из рисунка видно, что факторы $\mu_l$, $ReIdx$ и $ImIdx$ хорошо коррелируют с геометрическим альбедо $GA1$ (коэффициенты корреляции соответственно 0.70, 0.70 и -0.67), кроме этого наблюдается хорошая связь между $\mu_l$ и $ImIdx$ с коэффициентом корреляции -0.59, а также между $ReIdx$ и $ImIdx$ с коэффициентом корреляции -0.35. Все эти коэффициента корреляции имеют уровень значимости 0.001.
+
+Это говорит о том, что построение 
 
 
+```{r fit-the-model, echo=FALSE, cache.lazy=TRUE}
 fit1.eq1 <- lm(formula='GA1~MuL', data = analysis.aeronet)
 fit1.eq2 <- lm(formula='GA1~MuL+ReIdx', data = analysis.aeronet)
 fit1.eq3 <- lm(formula='GA1~MuL+ReIdx+ImIdx', data = analysis.aeronet)
-
-fit2.eq1 <- lm(formula='GA2~MuL', data = analysis.aeronet)
-fit2.eq2 <- lm(formula='GA2~MuL+ReIdx', data = analysis.aeronet)
-fit2.eq3 <- lm(formula='GA2~MuL+ReIdx*ImIdx', data = analysis.aeronet)
 ```
 
-Статистика подгона некоторых моделей:
 
-```{r}
-summary(fit1.eq1)
-
-summary(fit1.eq2)
-
-summary(fit1.eq3)
-```
-```{r}
+```{r prepare-jet-colormap, cache.lazy=TRUE, include=FALSE}
 jet.colors <-
   colorRampPalette(c("#00007F", "blue", "#007FFF", "cyan",
                      "#7FFF7F", "yellow", "#FF7F00", "red", "#7F0000"))
@@ -246,41 +240,7 @@ p3 <- ggplot()+
 grid.arrange(p1, p2, p3, ncol=1)
 
 ```
-```{r}
-a.fig <- lm(analysis.aeronet$GA1~analysis.aeronet$MuL)
-a.conf <- confint(a.fig)
 
-b.fig <- lm(analysis.aeronet$GA1~analysis.aeronet$ReIdx)
-b.conf <- confint(b.fig)
-
-c.fig <- lm(analysis.aeronet$GA1~analysis.aeronet$ImIdx)
-c.conf <- confint(c.fig)
-
-par(mfrow = c(1, 3), mar = c(4, 4, 2, 1), oma = c(0, 0, 2, 0))
-
-  plot(analysis.aeronet$MuL, analysis.aeronet$GA1, 
-       main="Geom. Alb. and mu_l")
-  abline(a.fig, col='red')
-  abline(a.conf[,1], lty=3, col='red')
-  abline(a.conf[,2], lty=3, col='red')
-  grid()
-  plot(analysis.aeronet$ReIdx, analysis.aeronet$GA1, 
-       main="Geom. Alb. and Reidx")
-  abline(b.fig, col='red')
-  abline(b.conf[,1], lty=3, col='red')
-  abline(b.conf[,2], lty=3, col='red')
-  grid()
-  plot(analysis.aeronet$ImIdx, analysis.aeronet$GA1, 
-       main="Geom. Alb. and Imidx")
-  abline(c.fig, col='red')
-  abline(c.conf[,1], lty=3, col='red')
-  abline(c.conf[,2], lty=3, col='red')
-  grid()
-  mtext("", outer = TRUE)
-
-
-
-```
 
 
 
